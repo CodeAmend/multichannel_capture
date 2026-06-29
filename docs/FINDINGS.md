@@ -43,6 +43,33 @@ default flag set when it reaches the capture list.
 
 ## Difficulties (things that were non-obvious to get working)
 
+### Getting audio off the realtime thread without blocking it (Phase 3)
+miniaudio's capture callback runs on a high-priority audio thread that **must
+never block or allocate** — do either and you get glitches/dropouts. The
+callback also only borrows the input buffer; miniaudio reuses it the instant the
+callback returns, so frames must be **copied out before returning**. Solution:
+the callback copies into a lock-free SPSC ring buffer (`ma_pcm_rb`, built into
+miniaudio) and does nothing else heavy. Dart drains the ring buffer separately.
+
+### Waking Dart from a native thread: `NativeCallable.listener` (Phase 3)
+A native thread can't just call into Dart. The modern Dart FFI answer is
+`NativeCallable<Void Function()>.listener(...)` — its `.nativeFunction` pointer
+can be invoked from **any** thread, and the Dart callback runs on the owning
+isolate's event loop. We pass that pointer to C as a "frames available" ping.
+This replaces the older `Dart_PostCObject` / `dart_api_dl.h` dance entirely. The
+data itself travels via the ring buffer (a plain FFI read), not through the
+callback — keeping the realtime thread fully decoupled from Dart's GC.
+Remember to `.close()` the NativeCallable on stop, or it leaks.
+
+### macOS capture silently fails without sandbox permission (Phase 3)
+The example app is sandboxed. Capturing audio needs **both**:
+- the `com.apple.security.device.audio-input` entitlement in **both**
+  `DebugProfile.entitlements` and `Release.entitlements`, and
+- an `NSMicrophoneUsageDescription` string in `Info.plist`.
+
+Miss these and the device may "open" but deliver only silence, or `start` fails
+outright — with no obvious error pointing at permissions.
+
 ### macOS native code builds via the podspec, not CMakeLists (Phase 1)
 `src/CMakeLists.txt` is for Android/Linux/Windows. On macOS/iOS the C is
 compiled through the **podspec**, so that's where miniaudio's system frameworks
