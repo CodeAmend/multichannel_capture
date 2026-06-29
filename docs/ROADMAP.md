@@ -9,7 +9,7 @@ is a self-contained, verifiable step. Status is updated as phases land.
 | 1 | Vendor miniaudio, prove it compiles & links (`mc_version` smoke test) | ✅ done |
 | 2 | Enumerate input devices (name, channels, default) | ✅ done |
 | 3 | Capture PCM from a selected device into a Dart `Stream` | ✅ done |
-| 4 | Example becomes a real demo (pick device → start → level meters / WAV) | 🔶 partial |
+| 4 | Example becomes a real demo (pick device → start → level meters / WAV) | 🔶 mostly done |
 
 ## Phase 3 — capture (done)
 
@@ -28,8 +28,12 @@ blocking the audio thread or the UI isolate. Shipped as:
 
 Verified: `flutter test integration_test -d macos` streams frames end to end.
 
-## Phase 4 — example demo (partial)
+## Phase 4 — example demo (mostly done)
 
-The example already does: pick device → start → live RMS level meter + frame
-counter. Still to do: write captured audio to a WAV file (miniaudio's
-`ma_encoder` can do this), and per-channel meters for multichannel devices.
+The example now does: pick device → start → live RMS level meter + frame
+counter → **record to a WAV file** and show the saved path. WAV writing lives in
+the library as `WavRecorder` (Dart-side, 16-bit PCM, synchronous I/O so the
+realtime thread is never touched — see [FINDINGS](FINDINGS.md)).
+
+Still to do: per-channel meters so a multichannel device (e.g. a 6-channel
+interface) shows each input separately rather than one averaged bar.

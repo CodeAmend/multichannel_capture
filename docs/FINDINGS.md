@@ -38,6 +38,13 @@ default flag set when it reaches the capture list.
   meaning the device supports all channel counts. The API surfaces this raw;
   callers must interpret it.
 - **`isDefault` is unreliable for selection** (see Quirks).
+- **Capture is f32-only, single session.** Audio is always interleaved 32-bit
+  float, and only one capture can run at a time (a second `startCapture` throws).
+  Fine for now; revisit if a use case needs s16 or simultaneous devices.
+- **`WavRecorder` writes 16-bit PCM** (broad compatibility), converting from f32
+  — so it's lossy at the bit-depth level. It uses synchronous I/O on the
+  caller's isolate; for very long / high-channel recordings, drive it from a
+  dedicated isolate. A lossless f32 WAV option could be added later.
 
 ---
 
