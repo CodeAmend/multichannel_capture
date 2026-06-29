@@ -1,5 +1,11 @@
 #include "multichannel_capture.h"
 
+// Compile the miniaudio implementation into this translation unit. Exactly one
+// .c file in the build must define MINIAUDIO_IMPLEMENTATION before including
+// the header; everywhere else it is just declarations.
+#define MINIAUDIO_IMPLEMENTATION
+#include "miniaudio.h"
+
 // A very short-lived native function.
 //
 // For very short-lived functions, it is fine to call them on the main isolate.
@@ -21,3 +27,6 @@ FFI_PLUGIN_EXPORT int sum_long_running(int a, int b) {
 #endif
   return a + b;
 }
+
+// Smoke test: prove miniaudio is linked by returning its version string.
+FFI_PLUGIN_EXPORT const char *mc_version(void) { return ma_version_string(); }

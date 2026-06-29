@@ -50,4 +50,19 @@ class MultichannelCaptureBindings {
       );
   late final _sum_long_running = _sum_long_runningPtr
       .asFunction<int Function(int, int)>();
+
+  /// Returns the version string of the bundled miniaudio library, e.g. "0.11.25".
+  ///
+  /// Smoke test confirming the miniaudio backend is compiled and linked. The
+  /// returned pointer is static storage owned by miniaudio; do not free it.
+  ffi.Pointer<ffi.Char> mc_version() {
+    return _mc_version();
+  }
+
+  late final _mc_versionPtr =
+      _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function()>>(
+        'mc_version',
+      );
+  late final _mc_version = _mc_versionPtr
+      .asFunction<ffi.Pointer<ffi.Char> Function()>();
 }

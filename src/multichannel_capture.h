@@ -28,3 +28,9 @@ FFI_PLUGIN_EXPORT int sum(int a, int b);
 // block Dart execution. This will cause dropped frames in Flutter applications.
 // Instead, call these native functions on a separate isolate.
 FFI_PLUGIN_EXPORT int sum_long_running(int a, int b);
+
+// Returns the version string of the bundled miniaudio library, e.g. "0.11.25".
+//
+// Smoke test confirming the miniaudio backend is compiled and linked. The
+// returned pointer is static storage owned by miniaudio; do not free it.
+FFI_PLUGIN_EXPORT const char *mc_version(void);

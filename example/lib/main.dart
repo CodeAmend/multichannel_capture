@@ -45,6 +45,12 @@ class _MyAppState extends State<MyApp> {
                 ),
                 spacerSmall,
                 Text(
+                  'miniaudio version = ${multichannel_capture.version()}',
+                  style: textStyle,
+                  textAlign: .center,
+                ),
+                spacerSmall,
+                Text(
                   'sum(1, 2) = $sumResult',
                   style: textStyle,
                   textAlign: .center,

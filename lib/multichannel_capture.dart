@@ -4,7 +4,14 @@ import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:ffi/ffi.dart';
+
 import 'multichannel_capture_bindings_generated.dart';
+
+/// The version of the bundled miniaudio library, e.g. `"0.11.25"`.
+///
+/// Smoke test confirming the native miniaudio backend is compiled and linked.
+String version() => _bindings.mc_version().cast<Utf8>().toDartString();
 
 /// A very short-lived native function.
 ///
