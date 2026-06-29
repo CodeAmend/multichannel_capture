@@ -1,0 +1,11 @@
+{
+  "dart.flutterSdkPath": null,
+  "dart.runPubGetOnPubspecChanges": "prompt",
+  "[dart]": {
+    "editor.formatOnSave": true,
+    "editor.rulers": [80],
+    "editor.selectionHighlight": false,
+    "editor.tabCompletion": "onlySnippets",
+    "editor.wordBasedSuggestions": "off"
+  }
+}
