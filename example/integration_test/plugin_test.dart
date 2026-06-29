@@ -8,6 +8,7 @@
 // Plain `flutter test` cannot run these — the native .framework is not loaded
 // in the headless host VM.
 
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -78,6 +79,43 @@ void main() {
       final capture = multichannel_capture.startCapture();
       addTearDown(capture.stop);
       expect(multichannel_capture.startCapture, throwsStateError);
+    });
+
+    test('records captured audio to a valid WAV file', () async {
+      final capture = multichannel_capture.startCapture();
+      final path =
+          '${Directory.systemTemp.path}/mc_test_${capture.sampleRate}.wav';
+      final recorder = multichannel_capture.WavRecorder.start(
+        path,
+        channels: capture.channels,
+        sampleRate: capture.sampleRate,
+      );
+
+      // Record a handful of real frames.
+      var frames = 0;
+      await for (final frame in capture.frames) {
+        recorder.addFrame(frame);
+        if (++frames >= 10) break;
+      }
+      recorder.stop();
+      capture.stop();
+
+      final file = File(path);
+      addTearDown(() {
+        if (file.existsSync()) file.deleteSync();
+      });
+
+      final bytes = file.readAsBytesSync();
+      expect(bytes.length, greaterThan(44)); // header + at least some audio
+      expect(String.fromCharCodes(bytes.sublist(0, 4)), 'RIFF');
+      expect(String.fromCharCodes(bytes.sublist(8, 12)), 'WAVE');
+
+      // The data-chunk size in the header must match the bytes written.
+      final view = ByteData.view(bytes.buffer);
+      final dataSize = view.getUint32(40, Endian.little);
+      expect(dataSize, bytes.length - 44);
+      // 16-bit samples * channels must divide the data evenly.
+      expect(dataSize % (capture.channels * 2), 0);
     });
   });
 

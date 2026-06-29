@@ -188,6 +188,99 @@ AudioCapture startCapture({
   return capture;
 }
 
+/// Writes captured PCM frames to a 16-bit WAV file.
+///
+/// Feed it the interleaved f32 frames from [AudioCapture.frames] via [addFrame]
+/// (samples are clamped and converted to signed 16-bit), then call [stop] to
+/// finalize the header. 16-bit PCM is chosen for broad player compatibility;
+/// f32 input is converted, so this is lossy at the bit-depth level.
+///
+/// I/O is synchronous to guarantee frames are written in arrival order. That is
+/// fine for a typical recording on the main isolate; for very long or
+/// high-channel-count sessions, drive it from a dedicated isolate.
+class WavRecorder {
+  /// Filesystem path being written to.
+  final String path;
+
+  /// Channel count of the audio being written.
+  final int channels;
+
+  /// Sample rate of the audio being written, in Hz.
+  final int sampleRate;
+
+  final RandomAccessFile _file;
+  int _dataBytes = 0;
+  bool _closed = false;
+
+  WavRecorder._(this.path, this.channels, this.sampleRate, this._file);
+
+  /// Opens [path] and writes a placeholder WAV header, ready for [addFrame].
+  factory WavRecorder.start(
+    String path, {
+    required int channels,
+    required int sampleRate,
+  }) {
+    final file = File(path).openSync(mode: FileMode.write);
+    final recorder = WavRecorder._(path, channels, sampleRate, file);
+    // Placeholder header; sizes are patched in [stop].
+    file.writeFromSync(recorder._header(0));
+    return recorder;
+  }
+
+  /// Appends one interleaved f32 [frame], converting samples to s16.
+  void addFrame(Float32List frame) {
+    if (_closed) {
+      throw StateError('WavRecorder is already stopped');
+    }
+    final bytes = Uint8List(frame.length * 2);
+    final view = ByteData.view(bytes.buffer);
+    for (var i = 0; i < frame.length; i++) {
+      final clamped = frame[i].clamp(-1.0, 1.0);
+      view.setInt16(i * 2, (clamped * 32767).round(), Endian.little);
+    }
+    _file.writeFromSync(bytes);
+    _dataBytes += bytes.length;
+  }
+
+  /// Finalizes the WAV header with the true sizes and closes the file.
+  void stop() {
+    if (_closed) return;
+    _closed = true;
+    _file.setPositionSync(0);
+    _file.writeFromSync(_header(_dataBytes));
+    _file.closeSync();
+  }
+
+  /// Builds a 44-byte canonical WAV header for [dataBytes] of 16-bit PCM.
+  Uint8List _header(int dataBytes) {
+    const bitsPerSample = 16;
+    final byteRate = sampleRate * channels * bitsPerSample ~/ 8;
+    final blockAlign = channels * bitsPerSample ~/ 8;
+    final bytes = Uint8List(44);
+    final view = ByteData.view(bytes.buffer);
+    void ascii(int offset, String s) {
+      for (var i = 0; i < s.length; i++) {
+        bytes[offset + i] = s.codeUnitAt(i);
+      }
+    }
+
+    ascii(0, 'RIFF');
+    view.setUint32(4, 36 + dataBytes, Endian.little);
+    ascii(8, 'WAVE');
+    ascii(12, 'fmt ');
+    view.setUint32(16, 16, Endian.little); // fmt chunk size
+    view.setUint16(20, 1, Endian.little); // audio format: PCM
+    view.setUint16(22, channels, Endian.little);
+    view.setUint32(24, sampleRate, Endian.little);
+    view.setUint32(28, byteRate, Endian.little);
+    view.setUint16(32, blockAlign, Endian.little);
+    view.setUint16(34, bitsPerSample, Endian.little);
+    ascii(36, 'data');
+    view.setUint32(40, dataBytes, Endian.little);
+    return bytes;
+  }
+}
+
 /// A very short-lived native function.
 ///
 /// For very short-lived functions, it is fine to call them on the main isolate.
