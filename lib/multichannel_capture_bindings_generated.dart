@@ -127,4 +127,83 @@ class MultichannelCaptureBindings {
       );
   late final _mc_input_device_channels = _mc_input_device_channelsPtr
       .asFunction<int Function(int)>();
+
+  /// Open the input device at `device_index` (or the system default if out of
+  /// range / negative) and start capturing interleaved 32-bit float PCM. Pass 0
+  /// for sample_rate/channels to accept the device's native values. Returns 0 on
+  /// success, -1 on error. Enumerate first to select a device by index.
+  int mc_start_capture(
+    int device_index,
+    int sample_rate,
+    int channels,
+    mc_data_ready_callback on_data_ready,
+  ) {
+    return _mc_start_capture(
+      device_index,
+      sample_rate,
+      channels,
+      on_data_ready,
+    );
+  }
+
+  late final _mc_start_capturePtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Int, ffi.Int, ffi.Int, mc_data_ready_callback)
+        >
+      >('mc_start_capture');
+  late final _mc_start_capture = _mc_start_capturePtr
+      .asFunction<int Function(int, int, int, mc_data_ready_callback)>();
+
+  /// Drain up to `max_frames` of captured audio into `out_buffer` (interleaved
+  /// f32; must hold max_frames * channels floats). Returns frames written, or -1
+  /// if not capturing.
+  int mc_read_frames(ffi.Pointer<ffi.Float> out_buffer, int max_frames) {
+    return _mc_read_frames(out_buffer, max_frames);
+  }
+
+  late final _mc_read_framesPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Float>, ffi.Int)>
+      >('mc_read_frames');
+  late final _mc_read_frames = _mc_read_framesPtr
+      .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
+
+  /// Stop capturing and release the device + ring buffer. Returns 0.
+  int mc_stop_capture() {
+    return _mc_stop_capture();
+  }
+
+  late final _mc_stop_capturePtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>('mc_stop_capture');
+  late final _mc_stop_capture = _mc_stop_capturePtr
+      .asFunction<int Function()>();
+
+  /// Actual channel count of the running capture, or 0 if not capturing.
+  int mc_capture_channels() {
+    return _mc_capture_channels();
+  }
+
+  late final _mc_capture_channelsPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>('mc_capture_channels');
+  late final _mc_capture_channels = _mc_capture_channelsPtr
+      .asFunction<int Function()>();
+
+  /// Actual sample rate of the running capture, or 0 if not capturing.
+  int mc_capture_sample_rate() {
+    return _mc_capture_sample_rate();
+  }
+
+  late final _mc_capture_sample_ratePtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>('mc_capture_sample_rate');
+  late final _mc_capture_sample_rate = _mc_capture_sample_ratePtr
+      .asFunction<int Function()>();
 }
+
+typedef mc_data_ready_callbackFunction = ffi.Void Function();
+typedef Dartmc_data_ready_callbackFunction = void Function();
+
+/// Notification invoked from the audio thread when captured frames are
+/// available to drain. On the Dart side this is a NativeCallable.listener.
+typedef mc_data_ready_callback =
+    ffi.Pointer<ffi.NativeFunction<mc_data_ready_callbackFunction>>;

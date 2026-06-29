@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
@@ -70,6 +71,121 @@ List<CaptureDevice> listInputDevices() {
       isDefault: _bindings.mc_input_device_is_default(i) != 0,
     );
   });
+}
+
+/// Number of frames drained from the native ring buffer per notification.
+/// At 48kHz this is ~85ms of slack, comfortably larger than a typical audio
+/// callback, so a single read keeps up with the device.
+const int _maxFramesPerRead = 4096;
+
+/// A live capture session producing interleaved 32-bit float PCM.
+///
+/// Obtain one from [startCapture]. Listen to [frames] for audio, then call
+/// [stop] (or cancel the subscription) to release the device.
+class AudioCapture {
+  /// Actual channel count negotiated with the device (frames in [frames] are
+  /// interleaved with this many samples per frame).
+  final int channels;
+
+  /// Actual sample rate negotiated with the device, in Hz.
+  final int sampleRate;
+
+  /// Stream of interleaved f32 PCM frames as they are captured.
+  ///
+  /// Each event is a freshly copied buffer of `frameCount * channels` samples.
+  Stream<Float32List> get frames => _controller.stream;
+
+  final StreamController<Float32List> _controller;
+  final NativeCallable<Void Function()> _onDataReady;
+  final Pointer<Float> _readBuffer;
+  bool _stopped = false;
+
+  AudioCapture._(
+    this.channels,
+    this.sampleRate,
+    this._controller,
+    this._onDataReady,
+    this._readBuffer,
+  );
+
+  /// Drain the native ring buffer into the stream. Invoked (via the native
+  /// listener) on the Dart event loop whenever frames are available.
+  void _drain() {
+    if (_stopped) return;
+    while (true) {
+      final int framesRead =
+          _bindings.mc_read_frames(_readBuffer, _maxFramesPerRead);
+      if (framesRead <= 0) break;
+      final int sampleCount = framesRead * channels;
+      // Copy out of the native buffer — it is reused on the next read.
+      _controller.add(Float32List.fromList(
+        _readBuffer.asTypedList(sampleCount),
+      ));
+      if (framesRead < _maxFramesPerRead) break;
+    }
+  }
+
+  /// Stop capturing, release the device, and close [frames].
+  void stop() {
+    if (_stopped) return;
+    _stopped = true;
+    _bindings.mc_stop_capture();
+    _onDataReady.close();
+    calloc.free(_readBuffer);
+    _controller.close();
+  }
+}
+
+/// Starts capturing audio from an input device.
+///
+/// Pass a [deviceIndex] from [listInputDevices] to pick a device, or omit it
+/// (or pass `null`) to use the system default input. Pass [sampleRate] and/or
+/// [channels] to request specific values, or leave them `0` to accept the
+/// device's native configuration (read the negotiated values back from the
+/// returned [AudioCapture]).
+///
+/// Throws a [StateError] if the device cannot be opened (e.g. microphone
+/// permission denied, or a capture is already running).
+AudioCapture startCapture({
+  int? deviceIndex,
+  int sampleRate = 0,
+  int channels = 0,
+}) {
+  final controller = StreamController<Float32List>();
+  // Late so the listener can reference the AudioCapture for draining.
+  late final AudioCapture capture;
+  final onDataReady = NativeCallable<Void Function()>.listener(() {
+    capture._drain();
+  });
+
+  final int result = _bindings.mc_start_capture(
+    deviceIndex ?? -1,
+    sampleRate,
+    channels,
+    onDataReady.nativeFunction,
+  );
+  if (result != 0) {
+    onDataReady.close();
+    controller.close();
+    throw StateError('Failed to start capture (device unavailable or '
+        'microphone permission denied)');
+  }
+
+  final int actualChannels = _bindings.mc_capture_channels();
+  final int actualSampleRate = _bindings.mc_capture_sample_rate();
+  final readBuffer = calloc<Float>(_maxFramesPerRead * actualChannels);
+
+  capture = AudioCapture._(
+    actualChannels,
+    actualSampleRate,
+    controller,
+    onDataReady,
+    readBuffer,
+  );
+
+  // Stop automatically if the consumer cancels their subscription.
+  controller.onCancel = capture.stop;
+  return capture;
 }
 
 /// A very short-lived native function.

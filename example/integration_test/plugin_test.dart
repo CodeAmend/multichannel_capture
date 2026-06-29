@@ -8,6 +8,8 @@
 // Plain `flutter test` cannot run these — the native .framework is not loaded
 // in the headless host VM.
 
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -49,6 +51,34 @@ void main() {
     // loopback) leaks the default flag into the capture list. isDefault is a
     // UI hint only; selecting the real default mic means opening a null
     // device id, not picking the isDefault entry. See CaptureDevice.isDefault.
+  });
+
+  group('capture', () {
+    test('opens the default device and streams PCM frames', () async {
+      final capture = multichannel_capture.startCapture();
+      addTearDown(capture.stop);
+
+      // Device negotiated a real configuration.
+      expect(capture.channels, greaterThan(0));
+      expect(capture.sampleRate, greaterThan(0));
+
+      // Frames flow from the native audio thread into the Dart stream. (The
+      // values may be silence if mic permission is denied, but the pipeline
+      // still delivers buffers — this proves the ring buffer + NativeCallable
+      // handoff works end to end.)
+      final frame = await capture.frames.first.timeout(
+        const Duration(seconds: 5),
+      );
+      expect(frame, isA<Float32List>());
+      expect(frame.length % capture.channels, 0);
+      expect(frame, isNotEmpty);
+    });
+
+    test('rejects a second concurrent capture', () {
+      final capture = multichannel_capture.startCapture();
+      addTearDown(capture.stop);
+      expect(multichannel_capture.startCapture, throwsStateError);
+    });
   });
 
   test('sum returns the sum of its arguments', () {
