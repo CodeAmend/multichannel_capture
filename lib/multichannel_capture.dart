@@ -13,6 +13,65 @@ import 'multichannel_capture_bindings_generated.dart';
 /// Smoke test confirming the native miniaudio backend is compiled and linked.
 String version() => _bindings.mc_version().cast<Utf8>().toDartString();
 
+/// An audio input (capture) device reported by the operating system.
+class CaptureDevice {
+  /// Human-readable device name, e.g. `"MacBook Pro Microphone"`.
+  final String name;
+
+  /// Stable index into the native device list, used to open the device later.
+  ///
+  /// Only valid until the next call to [listInputDevices].
+  final int index;
+
+  /// Native channel count, or 0 if the backend reports "any" (its wildcard).
+  final int channels;
+
+  /// Whether the backend flags this as a default device.
+  ///
+  /// Treat this as a UI hint only, not a selection mechanism. On macOS this
+  /// can be `true` for more than one input device: miniaudio's Core Audio
+  /// enumeration leaks the default-*output* flag onto any device that also
+  /// supports input (e.g. a loopback). To actually capture from the system
+  /// default input, open a null device id rather than picking this entry.
+  final bool isDefault;
+
+  const CaptureDevice({
+    required this.name,
+    required this.index,
+    required this.channels,
+    required this.isDefault,
+  });
+
+  @override
+  String toString() =>
+      'CaptureDevice(name: $name, index: $index, channels: $channels, '
+      'isDefault: $isDefault)';
+}
+
+/// Enumerates the available audio input devices.
+///
+/// Re-query this to pick up hardware that was plugged in or removed; the
+/// [CaptureDevice.index] values are only valid until the next call.
+///
+/// Throws a [StateError] if the native backend fails to enumerate devices.
+List<CaptureDevice> listInputDevices() {
+  final int count = _bindings.mc_refresh_input_devices();
+  if (count < 0) {
+    throw StateError('Failed to enumerate input devices');
+  }
+  return List<CaptureDevice>.generate(count, (int i) {
+    final Pointer<Char> namePtr = _bindings.mc_input_device_name(i);
+    final String name =
+        namePtr == nullptr ? '' : namePtr.cast<Utf8>().toDartString();
+    return CaptureDevice(
+      name: name,
+      index: i,
+      channels: _bindings.mc_input_device_channels(i),
+      isDefault: _bindings.mc_input_device_is_default(i) != 0,
+    );
+  });
+}
+
 /// A very short-lived native function.
 ///
 /// For very short-lived functions, it is fine to call them on the main isolate.

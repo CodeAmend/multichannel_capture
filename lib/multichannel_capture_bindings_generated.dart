@@ -65,4 +65,66 @@ class MultichannelCaptureBindings {
       );
   late final _mc_version = _mc_versionPtr
       .asFunction<ffi.Pointer<ffi.Char> Function()>();
+
+  /// (Re)enumerate input (capture) devices into an internal cache. Returns the
+  /// number of devices found, or -1 on error. Call before the accessors below,
+  /// and again to refresh after hardware changes.
+  int mc_refresh_input_devices() {
+    return _mc_refresh_input_devices();
+  }
+
+  late final _mc_refresh_input_devicesPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>(
+        'mc_refresh_input_devices',
+      );
+  late final _mc_refresh_input_devices = _mc_refresh_input_devicesPtr
+      .asFunction<int Function()>();
+
+  /// Number of input devices from the last mc_refresh_input_devices() call.
+  int mc_input_device_count() {
+    return _mc_input_device_count();
+  }
+
+  late final _mc_input_device_countPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>('mc_input_device_count');
+  late final _mc_input_device_count = _mc_input_device_countPtr
+      .asFunction<int Function()>();
+
+  /// Name of the input device at `index`, or NULL if out of range. Owned by the
+  /// native side; copy it, do not free it.
+  ffi.Pointer<ffi.Char> mc_input_device_name(int index) {
+    return _mc_input_device_name(index);
+  }
+
+  late final _mc_input_device_namePtr =
+      _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function(ffi.Int)>>(
+        'mc_input_device_name',
+      );
+  late final _mc_input_device_name = _mc_input_device_namePtr
+      .asFunction<ffi.Pointer<ffi.Char> Function(int)>();
+
+  /// Whether the input device at `index` is the system default (1) or not (0).
+  int mc_input_device_is_default(int index) {
+    return _mc_input_device_is_default(index);
+  }
+
+  late final _mc_input_device_is_defaultPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int)>>(
+        'mc_input_device_is_default',
+      );
+  late final _mc_input_device_is_default = _mc_input_device_is_defaultPtr
+      .asFunction<int Function(int)>();
+
+  /// Native channel count of the input device at `index`, or -1 on error.
+  /// 0 means miniaudio reports "all channel counts supported".
+  int mc_input_device_channels(int index) {
+    return _mc_input_device_channels(index);
+  }
+
+  late final _mc_input_device_channelsPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int)>>(
+        'mc_input_device_channels',
+      );
+  late final _mc_input_device_channels = _mc_input_device_channelsPtr
+      .asFunction<int Function(int)>();
 }

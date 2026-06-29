@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
-import 'dart:async';
 
-import 'package:multichannel_capture/multichannel_capture.dart' as multichannel_capture;
+import 'package:multichannel_capture/multichannel_capture.dart'
+    as multichannel_capture;
 
 void main() {
   runApp(const MyApp());
@@ -15,63 +15,70 @@ class MyApp extends StatefulWidget {
 }
 
 class _MyAppState extends State<MyApp> {
-  late int sumResult;
-  late Future<int> sumAsyncResult;
+  late List<multichannel_capture.CaptureDevice> _devices;
 
   @override
   void initState() {
     super.initState();
-    sumResult = multichannel_capture.sum(1, 2);
-    sumAsyncResult = multichannel_capture.sumAsync(3, 4);
+    _devices = multichannel_capture.listInputDevices();
+  }
+
+  void _refresh() {
+    setState(() {
+      _devices = multichannel_capture.listInputDevices();
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    const textStyle = TextStyle(fontSize: 25);
-    const spacerSmall = SizedBox(height: 10);
+    const titleStyle = TextStyle(fontSize: 20, fontWeight: FontWeight.bold);
     return MaterialApp(
       home: Scaffold(
-        appBar: AppBar(title: const Text('Native Packages')),
-        body: SingleChildScrollView(
-          child: Container(
-            padding: const .all(10),
-            child: Column(
-              children: [
-                const Text(
-                  'This calls a native function through FFI that is shipped as source in the package. '
-                  'The native code is built as part of the Flutter Runner build.',
-                  style: textStyle,
-                  textAlign: .center,
-                ),
-                spacerSmall,
-                Text(
-                  'miniaudio version = ${multichannel_capture.version()}',
-                  style: textStyle,
-                  textAlign: .center,
-                ),
-                spacerSmall,
-                Text(
-                  'sum(1, 2) = $sumResult',
-                  style: textStyle,
-                  textAlign: .center,
-                ),
-                spacerSmall,
-                FutureBuilder<int>(
-                  future: sumAsyncResult,
-                  builder: (BuildContext context, AsyncSnapshot<int> value) {
-                    final displayValue = (value.hasData)
-                        ? value.data
-                        : 'loading';
-                    return Text(
-                      'await sumAsync(3, 4) = $displayValue',
-                      style: textStyle,
-                      textAlign: .center,
-                    );
-                  },
-                ),
-              ],
+        appBar: AppBar(
+          title: const Text('multichannel_capture'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Re-scan devices',
+              onPressed: _refresh,
             ),
-          ),
+          ],
+        ),
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(
+                'miniaudio ${multichannel_capture.version()} · '
+                '${_devices.length} input device'
+                '${_devices.length == 1 ? '' : 's'}',
+                style: titleStyle,
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: _devices.isEmpty
+                  ? const Center(child: Text('No input devices found'))
+                  : ListView.builder(
+                      itemCount: _devices.length,
+                      itemBuilder: (context, i) {
+                        final d = _devices[i];
+                        return ListTile(
+                          leading: Icon(
+                            d.isDefault ? Icons.star : Icons.mic,
+                          ),
+                          title: Text(d.name),
+                          subtitle: Text(
+                            'index ${d.index} · '
+                            '${d.channels == 0 ? 'any' : '${d.channels}'} ch'
+                            '${d.isDefault ? ' · default' : ''}',
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
         ),
       ),
     );

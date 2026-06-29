@@ -34,3 +34,22 @@ FFI_PLUGIN_EXPORT int sum_long_running(int a, int b);
 // Smoke test confirming the miniaudio backend is compiled and linked. The
 // returned pointer is static storage owned by miniaudio; do not free it.
 FFI_PLUGIN_EXPORT const char *mc_version(void);
+
+// (Re)enumerate input (capture) devices into an internal cache. Returns the
+// number of devices found, or -1 on error. Call before the accessors below,
+// and again to refresh after hardware changes.
+FFI_PLUGIN_EXPORT int mc_refresh_input_devices(void);
+
+// Number of input devices from the last mc_refresh_input_devices() call.
+FFI_PLUGIN_EXPORT int mc_input_device_count(void);
+
+// Name of the input device at `index`, or NULL if out of range. Owned by the
+// native side; copy it, do not free it.
+FFI_PLUGIN_EXPORT const char *mc_input_device_name(int index);
+
+// Whether the input device at `index` is the system default (1) or not (0).
+FFI_PLUGIN_EXPORT int mc_input_device_is_default(int index);
+
+// Native channel count of the input device at `index`, or -1 on error.
+// 0 means miniaudio reports "all channel counts supported".
+FFI_PLUGIN_EXPORT int mc_input_device_channels(int index);
