@@ -38,8 +38,12 @@ flutter:
   # Please refer to README.md for a detailed explanation.
   plugin:
     platforms:
-      ios:
-        ffiPlugin: true
+      # iOS is intentionally NOT declared yet. miniaudio's iOS path #includes
+      # AVFoundation (Objective-C); this plugin compiles its source as plain C,
+      # which cannot import an ObjC module → the iOS build fails. macOS uses the
+      # CoreAudio-HAL path and compiles cleanly as C. Until the iOS source is
+      # compiled as Objective-C (separate effort), keep iOS off so host apps that
+      # only need macOS capture still build for iOS (where they use a mono path).
       macos:
         ffiPlugin: true
 
