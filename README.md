@@ -52,6 +52,33 @@ stream.listen((Uint8List pcm) {
 await cap.stop();
 ```
 
+## Timed capture — host-clock timestamps (macOS, live)
+
+For muxing capture audio with video into one file, each audio buffer needs a
+timestamp on the **same clock the video frames use**. `timedFrames` gives you that:
+the same PCM as `frames`, plus the host-clock time of each batch's first sample.
+
+```dart
+// Actual current API (macOS). Listen to ONE of frames / timedFrames per session.
+final cap = startCapture(channels: 2, sampleRate: 48000);
+
+cap.timedFrames.listen((TimedAudioBatch batch) {
+  batch.samples;         // interleaved f32 PCM (channels samples per frame)
+  batch.hostTime;        // RAW mach host-time units — feed
+                         // CMClockMakeHostTimeFromSystemUnits (NOT nanoseconds).
+                         // Same clock as AVFoundation video PTS.
+  batch.firstFrameIndex; // cumulative DELIVERED index; continuous, never skips.
+});
+
+cap.droppedFrames;       // frames lost to ring overflow (0 when healthy) — insert
+                         // exactly this much silence to keep audio == wall-clock.
+```
+
+The engine timestamps every buffer regardless; the untimed `frames` path is
+unchanged. `frames` and `timedFrames` are mutually exclusive per session (the ring
+is single-consumer) — claiming both throws. Design notes and the drift/gap
+measurement plan live in [`docs/PROPOSAL-timestamps.md`](docs/PROPOSAL-timestamps.md).
+
 ## Platform support
 
 | Platform | Status |
