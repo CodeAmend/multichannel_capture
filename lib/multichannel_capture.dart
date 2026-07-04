@@ -78,10 +78,41 @@ List<CaptureDevice> listInputDevices() {
 /// callback, so a single read keeps up with the device.
 const int _maxFramesPerRead = 4096;
 
+/// One drained batch of interleaved f32 PCM, tagged with the host-clock time of
+/// its first frame — the unit a muxer consumes to place audio on a shared A/V
+/// timeline. Obtain these from [AudioCapture.timedFrames].
+class TimedAudioBatch {
+  /// Interleaved f32 PCM, `channels` samples per frame (freshly copied).
+  final Float32List samples;
+
+  /// Host-clock time of `samples[0..channels-1]` in **raw mach host-time units**
+  /// (NOT nanoseconds) — the same clock AVFoundation stamps video PTS on
+  /// (`CMClockGetHostTimeClock`). Feed it to `CMClockMakeHostTimeFromSystemUnits`
+  /// to get a `CMTime` on the shared timeline; do not assume nanoseconds.
+  final int hostTime;
+
+  /// Cumulative index of this batch's first frame among frames **delivered** since
+  /// capture start. Monotonic and continuous — it never skips, even across a drop
+  /// (drops surface via [AudioCapture.droppedFrames]).
+  final int firstFrameIndex;
+
+  const TimedAudioBatch({
+    required this.samples,
+    required this.hostTime,
+    required this.firstFrameIndex,
+  });
+}
+
+// Which of the two mutually-exclusive reader views a session is using. Chosen at
+// first listen; the ring is single-consumer, so a session drains via exactly one.
+enum _CaptureMode { untimed, timed }
+
 /// A live capture session producing interleaved 32-bit float PCM.
 ///
-/// Obtain one from [startCapture]. Listen to [frames] for audio, then call
-/// [stop] (or cancel the subscription) to release the device.
+/// Obtain one from [startCapture]. Listen to **one** of [frames] (untimed) or
+/// [timedFrames] (host-clock-stamped) — they are two peer readers over the same
+/// single-consumer ring, so a session uses one or the other, not both. Call [stop]
+/// (or cancel the subscription) to release the device.
 class AudioCapture {
   /// Actual channel count negotiated with the device (frames in [frames] are
   /// interleaved with this many samples per frame).
@@ -90,28 +121,85 @@ class AudioCapture {
   /// Actual sample rate negotiated with the device, in Hz.
   final int sampleRate;
 
-  /// Stream of interleaved f32 PCM frames as they are captured.
+  /// Stream of interleaved f32 PCM frames as they are captured (untimed view).
   ///
   /// Each event is a freshly copied buffer of `frameCount * channels` samples.
-  Stream<Float32List> get frames => _controller.stream;
+  /// This path drains via `mc_read_frames` and never touches the timestamp
+  /// side-channel.
+  ///
+  /// Accessing this getter **claims the session for the untimed view**; throws
+  /// [StateError] if [timedFrames] has already claimed it (they are mutually
+  /// exclusive over the single-consumer ring — use one per session).
+  Stream<Float32List> get frames {
+    _claim(_CaptureMode.untimed);
+    return _controller.stream;
+  }
+
+  /// Stream of the same PCM as [frames], each batch tagged with the host-clock
+  /// time of its first frame (timed view). Drains via `mc_read_frames_timed`.
+  ///
+  /// Accessing this getter **claims the session for the timed view**; throws
+  /// [StateError] if [frames] has already claimed it.
+  Stream<TimedAudioBatch> get timedFrames {
+    _claim(_CaptureMode.timed);
+    return _timedController.stream;
+  }
+
+  // Claim the session's reader mode, or throw loudly (synchronously, at the call
+  // site) if the other view already claimed it. This is the fail-fast that stops a
+  // silent index desync when both views are wired by mistake.
+  void _claim(_CaptureMode mode) {
+    if (_mode != null && _mode != mode) {
+      throw StateError(
+        'multichannel_capture: frames (untimed) and timedFrames (timed) are '
+        'mutually exclusive over the single-consumer ring; this capture is '
+        'already claimed for the ${_mode!.name} view.',
+      );
+    }
+    _mode ??= mode;
+  }
+
+  /// Cumulative frames the device delivered that were dropped because the ring
+  /// filled (Dart wasn't draining fast enough). 0 in a healthy session.
+  int get droppedFrames => _bindings.mc_capture_dropped_frames();
 
   final StreamController<Float32List> _controller;
+  final StreamController<TimedAudioBatch> _timedController;
   final NativeCallable<Void Function()> _onDataReady;
   final Pointer<Float> _readBuffer;
+  final Pointer<Uint64> _hostTimeOut;
+  final Pointer<Uint64> _firstIndexOut;
+  _CaptureMode? _mode;
   bool _stopped = false;
 
   AudioCapture._(
     this.channels,
     this.sampleRate,
     this._controller,
+    this._timedController,
     this._onDataReady,
     this._readBuffer,
+    this._hostTimeOut,
+    this._firstIndexOut,
   );
 
-  /// Drain the native ring buffer into the stream. Invoked (via the native
-  /// listener) on the Dart event loop whenever frames are available.
+  /// Drain the native ring buffer into whichever view this session chose.
+  /// Invoked (via the native listener) on the Dart event loop when frames are
+  /// available. Before a consumer listens ([_mode] null) it does nothing, leaving
+  /// frames in the native ring so the untimed and timed indices never desync.
   void _drain() {
     if (_stopped) return;
+    switch (_mode) {
+      case _CaptureMode.untimed:
+        if (_controller.hasListener) _drainUntimed();
+      case _CaptureMode.timed:
+        if (_timedController.hasListener) _drainTimed();
+      case null:
+        break; // no consumer chosen yet; leave frames buffered in the native ring.
+    }
+  }
+
+  void _drainUntimed() {
     while (true) {
       final int framesRead =
           _bindings.mc_read_frames(_readBuffer, _maxFramesPerRead);
@@ -125,14 +213,36 @@ class AudioCapture {
     }
   }
 
-  /// Stop capturing, release the device, and close [frames].
+  void _drainTimed() {
+    while (true) {
+      final int framesRead = _bindings.mc_read_frames_timed(
+        _readBuffer,
+        _maxFramesPerRead,
+        _hostTimeOut,
+        _firstIndexOut,
+      );
+      if (framesRead <= 0) break;
+      final int sampleCount = framesRead * channels;
+      _timedController.add(TimedAudioBatch(
+        samples: Float32List.fromList(_readBuffer.asTypedList(sampleCount)),
+        hostTime: _hostTimeOut.value,
+        firstFrameIndex: _firstIndexOut.value,
+      ));
+      if (framesRead < _maxFramesPerRead) break;
+    }
+  }
+
+  /// Stop capturing, release the device, and close both streams.
   void stop() {
     if (_stopped) return;
     _stopped = true;
     _bindings.mc_stop_capture();
     _onDataReady.close();
     calloc.free(_readBuffer);
+    calloc.free(_hostTimeOut);
+    calloc.free(_firstIndexOut);
     _controller.close();
+    _timedController.close();
   }
 }
 
@@ -152,6 +262,7 @@ AudioCapture startCapture({
   int channels = 0,
 }) {
   final controller = StreamController<Float32List>();
+  final timedController = StreamController<TimedAudioBatch>();
   // Late so the listener can reference the AudioCapture for draining.
   late final AudioCapture capture;
   final onDataReady = NativeCallable<Void Function()>.listener(() {
@@ -167,6 +278,7 @@ AudioCapture startCapture({
   if (result != 0) {
     onDataReady.close();
     controller.close();
+    timedController.close();
     throw StateError('Failed to start capture (device unavailable or '
         'microphone permission denied)');
   }
@@ -174,17 +286,30 @@ AudioCapture startCapture({
   final int actualChannels = _bindings.mc_capture_channels();
   final int actualSampleRate = _bindings.mc_capture_sample_rate();
   final readBuffer = calloc<Float>(_maxFramesPerRead * actualChannels);
+  final hostTimeOut = calloc<Uint64>();
+  final firstIndexOut = calloc<Uint64>();
 
   capture = AudioCapture._(
     actualChannels,
     actualSampleRate,
     controller,
+    timedController,
     onDataReady,
     readBuffer,
+    hostTimeOut,
+    firstIndexOut,
   );
+
+  // Mode is claimed (and conflicts thrown) at the getter. Listening just kicks an
+  // initial drain of whatever the native ring already holds; the native ping drives
+  // the rest. Draining is gated on an actual listener (see _drain), so a session has
+  // exactly one clean ring origin.
+  controller.onListen = capture._drain;
+  timedController.onListen = capture._drain;
 
   // Stop automatically if the consumer cancels their subscription.
   controller.onCancel = capture.stop;
+  timedController.onCancel = capture.stop;
   return capture;
 }
 

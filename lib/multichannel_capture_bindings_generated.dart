@@ -169,6 +169,70 @@ class MultichannelCaptureBindings {
   late final _mc_read_frames = _mc_read_framesPtr
       .asFunction<int Function(ffi.Pointer<ffi.Float>, int)>();
 
+  /// Timed peer of mc_read_frames: drains the SAME PCM ring, and additionally
+  /// reports the host-clock time of the FIRST frame in the returned batch plus that
+  /// frame's cumulative index since capture start.
+  ///
+  /// `*out_host_time` is in RAW mach host-time units (the value mach_absolute_time()
+  /// returns — the same clock CMClockGetHostTimeClock stamps video PTS on; feed it to
+  /// CMClockMakeHostTimeFromSystemUnits, do NOT assume nanoseconds). `*out_first_frame_index`
+  /// is the cumulative count of frames DELIVERED before this batch (monotonic,
+  /// continuous, never skips — a drop puts no hole in it; drops surface via
+  /// mc_capture_dropped_frames). Both out-params are written only when the return
+  /// value is > 0. Returns frames written, or -1 if not capturing.
+  ///
+  /// This reader assumes it is the sole drainer of the ring for the session (the Dart
+  /// layer enforces one active stream per capture). Do NOT interleave it with
+  /// mc_read_frames on the same session, or the delivered index desyncs.
+  int mc_read_frames_timed(
+    ffi.Pointer<ffi.Float> out_buffer,
+    int max_frames,
+    ffi.Pointer<ffi.Uint64> out_host_time,
+    ffi.Pointer<ffi.Uint64> out_first_frame_index,
+  ) {
+    return _mc_read_frames_timed(
+      out_buffer,
+      max_frames,
+      out_host_time,
+      out_first_frame_index,
+    );
+  }
+
+  late final _mc_read_frames_timedPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<ffi.Float>,
+            ffi.Int,
+            ffi.Pointer<ffi.Uint64>,
+            ffi.Pointer<ffi.Uint64>,
+          )
+        >
+      >('mc_read_frames_timed');
+  late final _mc_read_frames_timed = _mc_read_frames_timedPtr
+      .asFunction<
+        int Function(
+          ffi.Pointer<ffi.Float>,
+          int,
+          ffi.Pointer<ffi.Uint64>,
+          ffi.Pointer<ffi.Uint64>,
+        )
+      >();
+
+  /// Cumulative count of frames the device delivered that were DROPPED because the
+  /// PCM ring was full, since capture start. 0 in a healthy session. A muxer can
+  /// insert exactly this much silence to keep audio length == wall-clock length.
+  int mc_capture_dropped_frames() {
+    return _mc_capture_dropped_frames();
+  }
+
+  late final _mc_capture_dropped_framesPtr =
+      _lookup<ffi.NativeFunction<ffi.Uint64 Function()>>(
+        'mc_capture_dropped_frames',
+      );
+  late final _mc_capture_dropped_frames = _mc_capture_dropped_framesPtr
+      .asFunction<int Function()>();
+
   /// Stop capturing and release the device + ring buffer. Returns 0.
   int mc_stop_capture() {
     return _mc_stop_capture();

@@ -71,6 +71,30 @@ FFI_PLUGIN_EXPORT int mc_start_capture(int device_index, int sample_rate,
 // if not capturing.
 FFI_PLUGIN_EXPORT int mc_read_frames(float *out_buffer, int max_frames);
 
+// Timed peer of mc_read_frames: drains the SAME PCM ring, and additionally
+// reports the host-clock time of the FIRST frame in the returned batch plus that
+// frame's cumulative index since capture start.
+//
+// `*out_host_time` is in RAW mach host-time units (the value mach_absolute_time()
+// returns — the same clock CMClockGetHostTimeClock stamps video PTS on; feed it to
+// CMClockMakeHostTimeFromSystemUnits, do NOT assume nanoseconds). `*out_first_frame_index`
+// is the cumulative count of frames DELIVERED before this batch (monotonic,
+// continuous, never skips — a drop puts no hole in it; drops surface via
+// mc_capture_dropped_frames). Both out-params are written only when the return
+// value is > 0. Returns frames written, or -1 if not capturing.
+//
+// This reader assumes it is the sole drainer of the ring for the session (the Dart
+// layer enforces one active stream per capture). Do NOT interleave it with
+// mc_read_frames on the same session, or the delivered index desyncs.
+FFI_PLUGIN_EXPORT int mc_read_frames_timed(float *out_buffer, int max_frames,
+                                           uint64_t *out_host_time,
+                                           uint64_t *out_first_frame_index);
+
+// Cumulative count of frames the device delivered that were DROPPED because the
+// PCM ring was full, since capture start. 0 in a healthy session. A muxer can
+// insert exactly this much silence to keep audio length == wall-clock length.
+FFI_PLUGIN_EXPORT uint64_t mc_capture_dropped_frames(void);
+
 // Stop capturing and release the device + ring buffer. Returns 0.
 FFI_PLUGIN_EXPORT int mc_stop_capture(void);
 

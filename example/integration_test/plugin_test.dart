@@ -8,6 +8,7 @@
 // Plain `flutter test` cannot run these — the native .framework is not loaded
 // in the headless host VM.
 
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -116,6 +117,109 @@ void main() {
       expect(dataSize, bytes.length - 44);
       // 16-bit samples * channels must divide the data evenly.
       expect(dataSize % (capture.channels * 2), 0);
+    });
+  });
+
+  // Timed capture (Phase 5). These are the automatable structural checks — the
+  // full sign-off measurement (loopback impulse bias + ≥20-min drift regression,
+  // and the long induced-gap survival run) is run MANUALLY with a loopback rig,
+  // per docs/PROPOSAL-timestamps.md. These prove plumbing, index continuity, and
+  // that a drop is counted without punching a hole in the delivered index.
+  group('timed capture', () {
+    // Collect [n] timed batches (or until [timeout]).
+    Future<List<multichannel_capture.TimedAudioBatch>> collectTimed(
+      multichannel_capture.AudioCapture capture,
+      int n, {
+      Duration timeout = const Duration(seconds: 8),
+    }) {
+      final out = <multichannel_capture.TimedAudioBatch>[];
+      final done = Completer<List<multichannel_capture.TimedAudioBatch>>();
+      late final StreamSubscription sub;
+      sub = capture.timedFrames.listen((b) {
+        out.add(b);
+        if (out.length >= n && !done.isCompleted) {
+          done.complete(out);
+          sub.cancel();
+        }
+      }, onError: (e) {
+        if (!done.isCompleted) done.completeError(e);
+      });
+      return done.future.timeout(timeout, onTimeout: () {
+        sub.cancel();
+        return out;
+      });
+    }
+
+    test('delivers host-stamped batches with continuous delivered indices',
+        () async {
+      final capture = multichannel_capture.startCapture();
+      addTearDown(capture.stop);
+
+      final batches = await collectTimed(capture, 15);
+      expect(batches.length, greaterThan(1),
+          reason: 'timed stream should deliver batches from a live input');
+
+      for (final b in batches) {
+        expect(b.samples, isNotEmpty);
+        expect(b.samples.length % capture.channels, 0);
+      }
+
+      // hostTime strictly increasing; firstFrameIndex exactly continuous with the
+      // cumulative delivered sample count (no gap, no skip) on a promptly-drained
+      // — therefore drop-free — session.
+      for (var i = 1; i < batches.length; i++) {
+        final prev = batches[i - 1];
+        final cur = batches[i];
+        expect(cur.hostTime, greaterThan(prev.hostTime),
+            reason: 'hostTime must be strictly increasing');
+        final prevFrames = prev.samples.length ~/ capture.channels;
+        expect(cur.firstFrameIndex, prev.firstFrameIndex + prevFrames,
+            reason: 'delivered index must be continuous');
+      }
+      expect(capture.droppedFrames, 0,
+          reason: 'a promptly-drained session should not drop');
+    });
+
+    test('induced drop is counted and leaves the delivered index continuous',
+        () async {
+      final capture = multichannel_capture.startCapture();
+      addTearDown(capture.stop);
+      expect(capture.channels, greaterThan(0));
+
+      // Stall: do NOT listen for well over the PCM-ring span (~0.34s), so the
+      // native ring overflows and frames are dropped before any drain.
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+
+      // Now drain. The dropped frames were never committed, so the delivered index
+      // stays continuous across the gap — the drop shows up as a time jump and in
+      // the counter, not as a hole in firstFrameIndex.
+      final batches = await collectTimed(capture, 15);
+      expect(batches.length, greaterThan(1));
+
+      expect(capture.droppedFrames, greaterThan(0),
+          reason: 'a 1.5s stall past the ring span must drop frames');
+
+      for (var i = 1; i < batches.length; i++) {
+        final prev = batches[i - 1];
+        final cur = batches[i];
+        expect(cur.hostTime, greaterThan(prev.hostTime));
+        final prevFrames = prev.samples.length ~/ capture.channels;
+        expect(cur.firstFrameIndex, prev.firstFrameIndex + prevFrames,
+            reason: 'delivered index stays continuous even after a drop');
+      }
+    });
+
+    test('frames and timedFrames are mutually exclusive (loud, synchronous)', () {
+      final capture = multichannel_capture.startCapture();
+      addTearDown(capture.stop);
+
+      // Untimed view claims the session...
+      final framesSub = capture.frames.listen((_) {});
+      addTearDown(framesSub.cancel);
+
+      // ...so accessing the timed view now throws synchronously at the call site,
+      // not as a swallowed async stream error.
+      expect(() => capture.timedFrames, throwsStateError);
     });
   });
 

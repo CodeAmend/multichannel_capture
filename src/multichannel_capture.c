@@ -1,6 +1,25 @@
 #include "multichannel_capture.h"
 
+#include <stdatomic.h>
 #include <string.h>
+
+// Raw host-clock reading in the platform's native "system units". On Apple this is
+// mach_absolute_time() — the exact currency CMClockMakeHostTimeFromSystemUnits
+// consumes and the clock CMClockGetHostTimeClock stamps video PTS on, so audio and
+// video land on one timeline with zero conversion. (Non-Apple builds fall back to a
+// monotonic nanosecond clock so the source still compiles; the package ships macOS
+// only, where the mach path is the real one.)
+#if defined(__APPLE__)
+#include <mach/mach_time.h>
+static inline uint64_t mc_host_now(void) { return mach_absolute_time(); }
+#else
+#include <time.h>
+static inline uint64_t mc_host_now(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+#endif
 
 // Compile the miniaudio implementation into this translation unit. Exactly one
 // .c file in the build must define MINIAUDIO_IMPLEMENTATION before including
@@ -144,14 +163,83 @@ static ma_uint32 g_capture_channels = 0;
 static ma_uint32 g_capture_sample_rate = 0;
 static mc_data_ready_callback g_data_ready_cb = NULL;
 
+// ---------------------------------------------------------------------------
+// Timed capture: companion anchor ring (Phase 5).
+//
+// The engine ALWAYS anchors — an unconditional side-channel to the untimed path,
+// which reads the PCM ring exactly as before and never consults these. Every
+// callback that commits >=1 frame stamps one anchor mapping the cumulative
+// WRITTEN-frame index of its first committed frame to a raw host-time reading
+// taken at the top of that callback.
+//
+// The anchor index is cumulative frames WRITTEN to the ring (post-drop), which
+// equals the drain-side delivered index ONLY because the PCM ring is lossless
+// FIFO: every committed frame drains in order, and drops happen before the index
+// advances. Advance g_frames_committed by frames *committed*, never by the
+// callback's frameCount.
+//
+// INVARIANT (see docs/PROPOSAL-timestamps.md): the anchor ring must OUT-SPAN the
+// PCM ring. MC_ANCHOR_CAPACITY anchors at ~one-per-callback (~10ms) ≈ 2.5s of
+// slack, comfortably longer than the PCM ring's ~0.34s (MC_RB_CAPACITY_FRAMES) —
+// so the reader, which lags by at most one PCM-ring depth, always finds live
+// anchors bracketing the frame it is placing, even mid-stall. If either ring is
+// resized, preserve this relationship.
+// ---------------------------------------------------------------------------
+#define MC_ANCHOR_CAPACITY 256
+
+#include "mc_anchor.h"  // mc_anchor + the pure, unit-tested mc_interp().
+
+static mc_anchor g_anchors[MC_ANCHOR_CAPACITY];
+static _Atomic uint64_t g_anchor_seq = 0;  // total anchors ever written; newest slot = (seq-1) % CAP
+static uint64_t g_frames_committed = 0;    // audio-thread only: cumulative frames written to the ring
+static uint64_t g_frames_read = 0;         // timed-reader only: cumulative frames drained
+static _Atomic uint64_t g_dropped = 0;     // cumulative frames dropped on ring overflow
+
+// Interpolate the host time of delivered frame `R` from the anchor ring. Returns 1
+// and writes *out_host on success, 0 if no anchors exist yet. The reader lags the
+// writer by well under the anchor span, so the slots it touches are quiescent; a
+// bounded retry re-checks the sequence in case a wrap raced the read.
+static int mc_interpolate_host_time(uint64_t R, uint64_t *out_host) {
+  for (int attempt = 0; attempt < 4; attempt++) {
+    uint64_t seq0 = atomic_load_explicit(&g_anchor_seq, memory_order_acquire);
+    if (seq0 == 0) {
+      return 0;
+    }
+    uint64_t n = (seq0 < MC_ANCHOR_CAPACITY) ? seq0 : MC_ANCHOR_CAPACITY;
+    uint64_t oldest = seq0 - n;
+
+    uint64_t host;
+    const int ok = mc_interp(g_anchors, MC_ANCHOR_CAPACITY, seq0, R, &host);
+
+    // Retry if the writer wrapped over the window we just read (the reader lags well
+    // under the anchor span, so this effectively never fires).
+    uint64_t seq1 = atomic_load_explicit(&g_anchor_seq, memory_order_acquire);
+    if (seq1 - oldest > MC_ANCHOR_CAPACITY) {
+      continue;
+    }
+    if (!ok) {
+      return 0;
+    }
+    *out_host = host;
+    return 1;
+  }
+  return 0;
+}
+
 // Runs on the native audio thread. Keep it allocation-free and non-blocking.
 static void mc_capture_data_callback(ma_device *pDevice, void *pOutput,
                                      const void *pInput, ma_uint32 frameCount) {
   (void)pOutput; // capture-only device: no output to fill.
 
+  // Anchor: raw host time at callback entry (a commpage read, no syscall) plus the
+  // cumulative WRITTEN index this callback's first committed frame will take.
+  const uint64_t hostTime = mc_host_now();
+  const uint64_t firstIndex = g_frames_committed;
+
   const ma_uint32 bytesPerFrame = g_capture_channels * (ma_uint32)sizeof(float);
   const ma_uint8 *src = (const ma_uint8 *)pInput;
   ma_uint32 framesRemaining = frameCount;
+  ma_uint32 committed = 0;
 
   while (framesRemaining > 0) {
     ma_uint32 framesToWrite = framesRemaining;
@@ -167,6 +255,26 @@ static void mc_capture_data_callback(ma_device *pDevice, void *pOutput,
     ma_pcm_rb_commit_write(&g_capture_rb, framesToWrite);
     src += framesToWrite * bytesPerFrame;
     framesRemaining -= framesToWrite;
+    committed += framesToWrite;
+  }
+
+  // Anything not committed was dropped on overflow.
+  if (framesRemaining > 0) {
+    atomic_fetch_add_explicit(&g_dropped, framesRemaining, memory_order_relaxed);
+  }
+
+  // Publish an anchor ONLY when this callback committed >=1 frame. A fully-dropped
+  // callback must not publish, or sustained overflow yields multiple anchors sharing
+  // one frameIndex and interpolation degenerates. This keeps frameIndex strictly
+  // increasing. Write the slot, then release-store the sequence so the reader sees
+  // a fully-written anchor.
+  if (committed > 0) {
+    uint64_t seq = atomic_load_explicit(&g_anchor_seq, memory_order_relaxed);
+    uint64_t slot = seq % MC_ANCHOR_CAPACITY;
+    g_anchors[slot].frameIndex = firstIndex;
+    g_anchors[slot].hostTime = hostTime;
+    atomic_store_explicit(&g_anchor_seq, seq + 1, memory_order_release);
+    g_frames_committed = firstIndex + committed;
   }
 
   if (g_data_ready_cb != NULL) {
@@ -225,6 +333,12 @@ FFI_PLUGIN_EXPORT int mc_start_capture(int device_index, int sample_rate,
     return -1;
   }
 
+  // Reset timed-capture state for the new session.
+  g_frames_committed = 0;
+  g_frames_read = 0;
+  atomic_store_explicit(&g_dropped, 0, memory_order_relaxed);
+  atomic_store_explicit(&g_anchor_seq, 0, memory_order_release);
+
   g_capture_active = MA_TRUE;
   return 0;
 }
@@ -263,6 +377,64 @@ FFI_PLUGIN_EXPORT int mc_read_frames(float *out_buffer, int max_frames) {
   }
 
   return (int)totalRead;
+}
+
+// Timed peer of mc_read_frames. Computes the host time of the first delivered frame
+// in this batch BEFORE draining (from the anchor ring), then drains the same PCM
+// ring identically and advances the delivered-frame counter. See the header for the
+// out-param contract and the sole-drainer requirement.
+FFI_PLUGIN_EXPORT int mc_read_frames_timed(float *out_buffer, int max_frames,
+                                           uint64_t *out_host_time,
+                                           uint64_t *out_first_frame_index) {
+  if (!g_capture_active) {
+    return -1;
+  }
+  if (out_buffer == NULL || max_frames <= 0) {
+    return 0;
+  }
+
+  const uint64_t firstIndex = g_frames_read; // first delivered frame of this batch.
+  uint64_t hostTime = 0;
+  const int haveTime = mc_interpolate_host_time(firstIndex, &hostTime);
+
+  const ma_uint32 bytesPerFrame = g_capture_channels * (ma_uint32)sizeof(float);
+  ma_uint8 *dst = (ma_uint8 *)out_buffer;
+  ma_uint32 framesRemaining = (ma_uint32)max_frames;
+  ma_uint32 totalRead = 0;
+
+  while (framesRemaining > 0) {
+    ma_uint32 framesToRead = framesRemaining;
+    void *pRead = NULL;
+    if (ma_pcm_rb_acquire_read(&g_capture_rb, &framesToRead, &pRead) !=
+        MA_SUCCESS) {
+      break;
+    }
+    if (framesToRead == 0) {
+      break; // Nothing more buffered.
+    }
+    memcpy(dst, pRead, framesToRead * bytesPerFrame);
+    ma_pcm_rb_commit_read(&g_capture_rb, framesToRead);
+    dst += framesToRead * bytesPerFrame;
+    framesRemaining -= framesToRead;
+    totalRead += framesToRead;
+  }
+
+  if (totalRead > 0) {
+    g_frames_read += totalRead;
+    if (out_first_frame_index != NULL) {
+      *out_first_frame_index = firstIndex;
+    }
+    if (out_host_time != NULL) {
+      *out_host_time = haveTime ? hostTime : 0;
+    }
+  }
+
+  return (int)totalRead;
+}
+
+// Cumulative frames dropped on ring overflow since capture start.
+FFI_PLUGIN_EXPORT uint64_t mc_capture_dropped_frames(void) {
+  return atomic_load_explicit(&g_dropped, memory_order_relaxed);
 }
 
 // Stop capturing and release the device + ring buffer. ma_device_uninit joins
